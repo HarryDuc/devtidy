@@ -1,4 +1,4 @@
-module github.com/dunkbing/devtidy
+module github.com/harryduc/devtidy
 
 go 1.24.4
 

@@ -45,7 +45,7 @@ changelog:
 
 release:
   github:
-    owner: dunkbing
+    owner: harryduc
     name: devtidy
   name_template: "Release {{ .Tag }}"
   draft: false
@@ -54,9 +54,9 @@ release:
 homebrew_casks:
   - name: devtidy
     repository:
-      owner: dunkbing
+      owner: harryduc
       name: homebrew-brews
-    homepage: https://github.com/dunkbing/devtidy
+    homepage: https://github.com/harryduc/devtidy
     description: A terminal UI app to clean up development dependencies and build artifacts.
     hooks:
         post:

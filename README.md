@@ -24,12 +24,12 @@ A terminal UI app to clean up development dependencies and build artifacts.
 
 ### Homebrew (macOS/Linux)
 ```bash
-brew install --cask dunkbing/brews/devtidy
+brew install --cask harryduc/brews/devtidy
 ```
 
 ### Go install
 ```bash
-go install github.com/dunkbing/devtidy@latest
+go install github.com/harryduc/devtidy@latest
 ```
 
 ## Usage
