@@ -82,6 +82,8 @@ type Model struct {
 	cleanedSize       int64
 	currentDir        string
 	useGitignore      bool
+	dryRun            bool
+	minSize           int64
 	scanStartTime     time.Time
 	scanDuration      time.Duration
 	scannedItems      int
@@ -94,10 +96,16 @@ type Model struct {
 
 // Key mappings
 var keys = struct {
-	toggle key.Binding
-	clean  key.Binding
-	quit   key.Binding
-	help   key.Binding
+	toggle      key.Binding
+	clean       key.Binding
+	quit        key.Binding
+	help        key.Binding
+	selectAll   key.Binding
+	deselectAll key.Binding
+	invert      key.Binding
+	sortSize    key.Binding
+	sortName    key.Binding
+	sortType    key.Binding
 }{
 	toggle: key.NewBinding(
 		key.WithKeys(" "),
@@ -114,6 +122,30 @@ var keys = struct {
 	help: key.NewBinding(
 		key.WithKeys("?"),
 		key.WithHelp("?", "help"),
+	),
+	selectAll: key.NewBinding(
+		key.WithKeys("a"),
+		key.WithHelp("a", "select all"),
+	),
+	deselectAll: key.NewBinding(
+		key.WithKeys("d"),
+		key.WithHelp("d", "deselect all"),
+	),
+	invert: key.NewBinding(
+		key.WithKeys("i"),
+		key.WithHelp("i", "invert selection"),
+	),
+	sortSize: key.NewBinding(
+		key.WithKeys("s"),
+		key.WithHelp("s", "sort by size"),
+	),
+	sortName: key.NewBinding(
+		key.WithKeys("n"),
+		key.WithHelp("n", "sort by name"),
+	),
+	sortType: key.NewBinding(
+		key.WithKeys("t"),
+		key.WithHelp("t", "sort by type"),
 	),
 }
 
@@ -139,7 +171,7 @@ var (
 			Bold(true)
 )
 
-func initialModel(targetDir string, useGitignore bool) Model {
+func initialModel(targetDir string, useGitignore bool, dryRun bool, minSize int64) Model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
@@ -147,7 +179,11 @@ func initialModel(targetDir string, useGitignore bool) Model {
 	prog := progress.New(progress.WithDefaultGradient())
 
 	l := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
-	l.Title = "Cleanable Items"
+	title := "Cleanable Items"
+	if dryRun {
+		title += " (DRY RUN)"
+	}
+	l.Title = title
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
 	l.Styles.Title = titleStyle
@@ -160,6 +196,8 @@ func initialModel(targetDir string, useGitignore bool) Model {
 		progress:          prog,
 		currentDir:        targetDir,
 		useGitignore:      useGitignore,
+		dryRun:            dryRun,
+		minSize:           minSize,
 		scanStartTime:     time.Now(),
 		scannedItems:      0,
 		calculatingSizes:  false,
@@ -201,6 +239,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !m.cleaning {
 					return m.startCleaning()
 				}
+			case key.Matches(msg, keys.selectAll):
+				if !m.cleaning {
+					return m.selectAll(), nil
+				}
+			case key.Matches(msg, keys.deselectAll):
+				if !m.cleaning {
+					return m.deselectAll(), nil
+				}
+			case key.Matches(msg, keys.invert):
+				if !m.cleaning {
+					return m.invertSelection(), nil
+				}
+			case key.Matches(msg, keys.sortSize):
+				if !m.cleaning {
+					return m.sortBySize(), nil
+				}
+			case key.Matches(msg, keys.sortName):
+				if !m.cleaning {
+					return m.sortByName(), nil
+				}
+			case key.Matches(msg, keys.sortType):
+				if !m.cleaning {
+					return m.sortByType(), nil
+				}
 			}
 		case stateCleaning:
 			if key.Matches(msg, keys.quit) {
@@ -228,7 +290,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.totalSizeJobs == 0 {
-			// No sizes to calculate, go straight to selecting
+			// No sizes to calculate, apply minSize filter if needed
+			if m.minSize > 0 {
+				filteredItems := []CleanableItem{}
+				for _, item := range m.items {
+					if item.Size >= m.minSize {
+						filteredItems = append(filteredItems, item)
+					}
+				}
+				m.items = filteredItems
+				m.scannedItems = len(m.items)
+			}
+			// Go straight to selecting
 			m.state = stateSelecting
 			listItems := make([]list.Item, len(m.items))
 			for i, item := range m.items {
@@ -252,7 +325,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		item := msg.items[msg.index]
 
 		// Clean the item and update cleaned size
-		if err := os.RemoveAll(item.Path); err == nil {
+		if m.dryRun {
+			// Dry run mode: just simulate cleaning
 			m.cleanedSize += item.Size
 
 			// Remove the cleaned item from the model's items list
@@ -269,6 +343,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				listItems[i] = modelItem
 			}
 			m.list.SetItems(listItems)
+		} else {
+			// Actually delete the item
+			if err := os.RemoveAll(item.Path); err == nil {
+				m.cleanedSize += item.Size
+
+				// Remove the cleaned item from the model's items list
+				for i, modelItem := range m.items {
+					if modelItem.Path == item.Path {
+						m.items = append(m.items[:i], m.items[i+1:]...)
+						break
+					}
+				}
+
+				// Update the list display
+				listItems := make([]list.Item, len(m.items))
+				for i, modelItem := range m.items {
+					listItems[i] = modelItem
+				}
+				m.list.SetItems(listItems)
+			}
 		}
 
 		// Send progress update
@@ -315,6 +409,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if size, exists := m.pendingSizes[item.Path]; exists {
 						m.items[i].Size = size
 					}
+				}
+
+				// Filter by minimum size if specified
+				if m.minSize > 0 {
+					filteredItems := []CleanableItem{}
+					for _, item := range m.items {
+						if item.Size >= m.minSize {
+							filteredItems = append(filteredItems, item)
+						}
+					}
+					m.items = filteredItems
+					m.scannedItems = len(m.items)
 				}
 
 				sort.Slice(m.items, func(i, j int) bool {
@@ -377,26 +483,36 @@ func (m Model) View() string {
 	case stateSelecting:
 		help := "\nControls:\n" +
 			"  space: toggle selection (✓ = selected)\n" +
+			"  a: select all | d: deselect all | i: invert selection\n" +
+			"  s: sort by size | n: sort by name | t: sort by type\n" +
 			"  c: clean selected items\n" +
-			"  q: quit\n" +
-			"  /: filter items"
+			"  /: filter items | q: quit"
 
 		totalSize := m.calculateTotalSelectedSize()
 		selectedCount := m.countSelectedItems()
 
+		dryRunText := ""
+		if m.dryRun {
+			dryRunText = " [DRY RUN]"
+		}
 		status := fmt.Sprintf(
-			"\nScan time: %v (%d items) | Selected: %d items (%s)",
+			"\nScan time: %v (%d items) | Selected: %d items (%s)%s",
 			m.scanDuration.Round(time.Millisecond),
 			m.scannedItems,
 			selectedCount,
 			formatSize(totalSize),
+			dryRunText,
 		)
 
 		content := m.list.View() + status
 
 		// Show progress bar if cleaning
 		if m.cleaning {
-			content += "\n\nCleaning in progress...\n" + m.progress.View()
+			cleaningText := "Cleaning in progress..."
+			if m.dryRun {
+				cleaningText = "Simulating cleaning (DRY RUN)..."
+			}
+			content += "\n\n" + cleaningText + "\n" + m.progress.View()
 		}
 
 		content += help
@@ -404,15 +520,25 @@ func (m Model) View() string {
 		return docStyle.Render(content)
 
 	case stateCleaning:
+		cleaningText := "Cleaning selected items..."
+		if m.dryRun {
+			cleaningText = "Simulating cleaning (DRY RUN)..."
+		}
 		return docStyle.Render(fmt.Sprintf(
-			"Cleaning selected items...\n\n%s\n\nPress q to quit",
+			"%s\n\n%s\n\nPress q to quit",
+			cleaningText,
 			m.progress.View(),
 		))
 
 	case stateComplete:
+		completeText := "✓ Cleaning complete!"
+		if m.dryRun {
+			completeText = "✓ Simulation complete! (DRY RUN - nothing was deleted)"
+		}
 		return docStyle.Render(successStyle.Render(
 			fmt.Sprintf(
-				"✓ Cleaning complete!\n\nCleaned: %s\n\nPress q to quit",
+				"%s\n\nWould clean: %s\n\nPress q to quit",
+				completeText,
 				formatSize(m.cleanedSize),
 			),
 		))
@@ -469,6 +595,81 @@ func (m Model) countSelectedItems() int {
 		}
 	}
 	return count
+}
+
+func (m Model) selectAll() Model {
+	for i := range m.items {
+		m.items[i].Selected = true
+	}
+	listItems := make([]list.Item, len(m.items))
+	for i, item := range m.items {
+		listItems[i] = item
+	}
+	m.list.SetItems(listItems)
+	return m
+}
+
+func (m Model) deselectAll() Model {
+	for i := range m.items {
+		m.items[i].Selected = false
+	}
+	listItems := make([]list.Item, len(m.items))
+	for i, item := range m.items {
+		listItems[i] = item
+	}
+	m.list.SetItems(listItems)
+	return m
+}
+
+func (m Model) invertSelection() Model {
+	for i := range m.items {
+		m.items[i].Selected = !m.items[i].Selected
+	}
+	listItems := make([]list.Item, len(m.items))
+	for i, item := range m.items {
+		listItems[i] = item
+	}
+	m.list.SetItems(listItems)
+	return m
+}
+
+func (m Model) sortBySize() Model {
+	sort.Slice(m.items, func(i, j int) bool {
+		return m.items[i].Size > m.items[j].Size
+	})
+	listItems := make([]list.Item, len(m.items))
+	for i, item := range m.items {
+		listItems[i] = item
+	}
+	m.list.SetItems(listItems)
+	return m
+}
+
+func (m Model) sortByName() Model {
+	sort.Slice(m.items, func(i, j int) bool {
+		return m.items[i].Path < m.items[j].Path
+	})
+	listItems := make([]list.Item, len(m.items))
+	for i, item := range m.items {
+		listItems[i] = item
+	}
+	m.list.SetItems(listItems)
+	return m
+}
+
+func (m Model) sortByType() Model {
+	sort.Slice(m.items, func(i, j int) bool {
+		if m.items[i].Type != m.items[j].Type {
+			return m.items[i].Type < m.items[j].Type
+		}
+		return m.items[i].Path < m.items[j].Path
+	})
+	listItems := make([]list.Item, len(m.items))
+	for i, item := range m.items {
+		listItems[i] = item
+	}
+	m.list.SetItems(listItems)
+	return m
 }
 
 type scanJob struct {
@@ -879,6 +1080,40 @@ func formatSize(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
+func parseSize(sizeStr string) (int64, error) {
+	if sizeStr == "" {
+		return 0, nil
+	}
+
+	sizeStr = strings.TrimSpace(strings.ToUpper(sizeStr))
+	var multiplier int64 = 1
+	var numStr string
+
+	if strings.HasSuffix(sizeStr, "KB") {
+		multiplier = 1024
+		numStr = strings.TrimSuffix(sizeStr, "KB")
+	} else if strings.HasSuffix(sizeStr, "MB") {
+		multiplier = 1024 * 1024
+		numStr = strings.TrimSuffix(sizeStr, "MB")
+	} else if strings.HasSuffix(sizeStr, "GB") {
+		multiplier = 1024 * 1024 * 1024
+		numStr = strings.TrimSuffix(sizeStr, "GB")
+	} else if strings.HasSuffix(sizeStr, "TB") {
+		multiplier = 1024 * 1024 * 1024 * 1024
+		numStr = strings.TrimSuffix(sizeStr, "TB")
+	} else {
+		numStr = sizeStr
+	}
+
+	var num float64
+	_, err := fmt.Sscanf(numStr, "%f", &num)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size format: %s", sizeStr)
+	}
+
+	return int64(num * float64(multiplier)), nil
+}
+
 const version = "v1.0.5"
 
 var cleanablePatterns = map[string]string{
@@ -900,6 +1135,28 @@ var cleanablePatterns = map[string]string{
 	"DerivedData":         "Xcode derived data",
 	"*.log":               "Log files",
 	"*.tmp":               "Temporary files",
+	".next":               "Next.js build output",
+	".turbo":              "Turborepo cache",
+	".nuxt":               "Nuxt.js build output",
+	".output":             "Nuxt.js output",
+	".idea":               "IntelliJ IDEA config",
+	".vscode":             "VS Code config",
+	"coverage":            "Test coverage reports",
+	".nyc_output":         "NYC test coverage",
+	".sass-cache":         "Sass cache",
+	".cache":              "Cache directory",
+	".parcel-cache":       "Parcel cache",
+	".eslintcache":        "ESLint cache",
+	".yarn":               "Yarn cache",
+	".pnpm-store":         "pnpm store",
+	"out":                 "Output directory",
+	".out":                "Output directory",
+	"tmp":                 "Temporary files",
+	"temp":                "Temporary files",
+	".DS_Store":           "macOS system file",
+	"Thumbs.db":           "Windows thumbnail cache",
+	".terraform":          "Terraform cache",
+	".terraform.lock.hcl": "Terraform lock file",
 }
 
 func showVersion() {
@@ -916,6 +1173,8 @@ func showHelp() {
 	fmt.Println("  -h, --help      Show this help message")
 	fmt.Println("  -v, --version   Show version information")
 	fmt.Println("  --gitignore     Scan files matching .gitignore patterns")
+	fmt.Println("  --dry-run       Preview what would be cleaned without deleting")
+	fmt.Println("  --min-size      Only show items larger than specified size (e.g., 100MB, 1GB)")
 	fmt.Println()
 	fmt.Println("ARGUMENTS:")
 	fmt.Println("  directory       Target directory to scan (default: current directory)")
@@ -933,12 +1192,17 @@ func showHelp() {
 	fmt.Println("  devtidy                    # Scan current directory")
 	fmt.Println("  devtidy /path/to/project   # Scan specific directory")
 	fmt.Println("  devtidy --gitignore        # Scan using .gitignore patterns")
+	fmt.Println("  devtidy --dry-run          # Preview without deleting")
+	fmt.Println("  devtidy --min-size 100MB   # Only show items >= 100MB")
+	fmt.Println("  devtidy --dry-run --min-size 1GB  # Preview items >= 1GB")
 	fmt.Println()
 }
 
 func main() {
 	// Define command line flags
 	var gitignoreFlag = flag.Bool("gitignore", false, "scan files matching .gitignore patterns")
+	var dryRunFlag = flag.Bool("dry-run", false, "preview what would be cleaned without deleting")
+	var minSizeFlag = flag.String("min-size", "", "only show items larger than specified size (e.g., 100MB, 1GB)")
 	var helpFlag = flag.Bool("h", false, "show help")
 	var help2Flag = flag.Bool("help", false, "show help")
 	var versionFlag = flag.Bool("v", false, "show version")
@@ -982,7 +1246,16 @@ func main() {
 		}
 	}
 
-	model := initialModel(targetDir, *gitignoreFlag)
+	var minSize int64
+	if *minSizeFlag != "" {
+		var err error
+		minSize, err = parseSize(*minSizeFlag)
+		if err != nil {
+			log.Fatalf("Error: Invalid size format '%s': %v", *minSizeFlag, err)
+		}
+	}
+
+	model := initialModel(targetDir, *gitignoreFlag, *dryRunFlag, minSize)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
